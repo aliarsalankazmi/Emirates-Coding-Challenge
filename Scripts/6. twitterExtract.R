@@ -9,8 +9,8 @@ op <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\emirat
 
 
 #Keys
-consumer_key = "etjOWrV0DhWRdjnWpK4LDnZhF"
-consumer_secret = "WaIS9j45da7UwgrB5DY19jCpez8ANZz0c1TBQ3H8iEoBXGVb0f"
+consumer_key = ""
+consumer_secret = ""
 tw_token <- create_token(consumer_key = consumer_key, consumer_secret = consumer_secret)
 
 
