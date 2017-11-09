@@ -3,10 +3,8 @@ pkgs <- c("rtweet", "data.table", "dplyr")
 loaded <- sapply(pkgs, require, character.only = T)
 all(loaded)
 
-
 #File paths and URLs
 op <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\emirates"
-
 
 #Keys
 consumer_key = ""
