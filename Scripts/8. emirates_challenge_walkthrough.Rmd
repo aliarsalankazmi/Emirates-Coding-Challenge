@@ -1,0 +1,760 @@
+---
+output:
+  html_document:
+    number_sections: no
+    theme: journal
+    toc: yes
+    variant: markdown_strict
+    css: C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\Overview/style.css
+---
+
+```{r global_options_knitr, include=FALSE, echo = FALSE, warning = FALSE, message = FALSE, cache=TRUE}
+
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(hrbrthemes)
+library(viridis)
+opts_chunk$set(include = FALSE, echo = FALSE, warning = FALSE, message = FALSE)
+
+```
+
+
+
+# Emirates Coding Challenge {.jumbotron}
+
+# About
+
+As part of the interviewing process, Emirates asked candidates to develop a Sentiment Analysis model, based on Deep Learning.  Rules for this activity are:
+
+- The source code should be available to us for download, ideally
+via GitHub or Dropbox  
+- Share detailed approach and instructions document  
+- Project has to be completed within a 7 days from the date for
+sharing this document.
+
+
+# Tools Used
+
+Following tools will be used for this project:  
+
+- `R`, due to its versatility, suitability, and effectiveness, will be the primary tool  
+- `Keras`, as API for `TensorFlow`, will be used for developing and experimenting with deep learning models
+
+
+# Data for Training a Model
+
+In order to train a Sentiment Analysis model, typically a labeled dataset is required on which a model could be trained. For this activity, the [American Airline Tweets'](https://www.kaggle.com/crowdflower/twitter-airline-
+sentiment/data) dataset was suggested, as it contains labeled examples of positive and negative sentiment. Additionally, the tweets are from the same domain - airline industry - which is crucial for predictive learning tasks.
+
+
+```{r loadLibraries, eval = TRUE, include=FALSE}
+
+#############################################
+###### Loading packages & file paths #######
+#############################################
+
+pkgs <- c("data.table", "ggplot2", "dplyr", "stringr", "purrr", "bit64", "hrbrthemes", "scales", "caret",
+		"openNLP", "NLP", "spacyr", "tidytext", "keras")
+loadedPkgs <- sapply(pkgs, require, character.only = T)
+# checking all pkgs loaded
+all(loadedPkgs)
+
+dp <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\non-emirates"
+f1 <- list.files(dp, full.names = T, pattern = "^Tweets.*csv$")
+
+#Not initialising the following as not required...
+#spacy_initialize()
+
+
+
+
+```
+
+
+# Data Inspection and Exploration
+
+A quick inspection of the downloaded data to get a sense of it, is presented below.
+
+```{r firstInspection, eval = TRUE}
+
+dfTw <- fread(f1)
+glimpse(dfTw)
+
+```
+
+
+It is worth checking the proportion of data present for each of the sentiments, as we will need to be mindful of [class imbalance problems](https://link.springer.com/referenceworkentry/10.1007%2F978-0-387-30164-8_110). As we can see, the dataset is biased towards negative sentiment.
+
+```{r eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=8, fig.height=5}
+
+dfTw[, .N, by = airline_sentiment
+	][, proportion := N/sum(N)] %>%
+	ggplot(data = ., aes(x = airline_sentiment, y = proportion)) + 
+	geom_col() +
+	scale_y_continuous(labels = percent) +
+  ggtitle("Proportion of records present for each sentiment", subtitle = "The dataset is biased towards the negative sentiment tweets") +
+	theme_ipsum()
+
+```
+
+We also saw a column denoting the confidence in the classification/labelling of a tweet's sentiment. The said column can be used to check how confident human users were when they would identify a tweet as negative or positive.
+
+```{r eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+
+# Let's see how much confidence there is for each sentiment
+ggplot(data = dfTw, aes(x = airline_sentiment_confidence)) +
+geom_histogram() +
+theme_ipsum() +
+ggtitle("Histogram of Confidence levels when labelling a tweet", subtitle = "Most labels were done confidently, although there are cases where confidence is shaky") +
+facet_wrap(~airline_sentiment)
+
+```
+
+Whilst it is evident that most labelling was done confidently, there are some cases in which confidence was mere 0.5 or 50%. Interestingly, this problem was more severe for Neutral and Positive classes.
+
+# Data Cleaning
+
+In order to remove ampersands (&), and to deal with quotes, we will use the following `Regular Expressions`. We are also removing all `@` signs, as they only add noise to our task - we need to extrapolate from the current dataset to tweets for emirates, and info such as `@FlightName` and geographical locations will need to be removed to prevent our model from being unable to `generalise`. We have a small dataset anyway, so `overfitting` can be a potential problem when using deep learning!
+
+```{r echo=TRUE, eval=FALSE}
+
+# We don't care for the @.+ , so we can safely remove them
+dfTw[, cText := gsub("@.+?\\b", "", text)]
+
+# Remove ampersand, replace quotes such as " with '. Because quotes may often be used in sarcasm. We need to account this
+# as a feature in our model
+dfTw[, cText := gsub("&amp;", "", cText)]
+dfTw[, cText := gsub("&quot;", " ' ", cText)]
+dfTw[, cText := gsub('"'," ' ", cText)]
+
+# We have some strange characters too, due to encoding... Try adjusting this to ASCII
+dfTw[, cText := iconv(cText, to = "ASCII//TRANSLIT")]
+
+# Removing airline names
+dfTw[, cText := gsub("\\bvirgin\\b", "", cText, ignore.case = T)]
+dfTw[, cText := gsub("\\bunited\\b", "", cText, ignore.case = T)]
+dfTw[, cText := gsub("\\bsouthwest\\b", "", cText, ignore.case = T)]
+dfTw[, cText := gsub("\\bdelta\\b", "", cText, ignore.case = T)]
+dfTw[, cText := gsub("\\bus airways\\b", "", cText, ignore.case = T)]
+dfTw[, cText := gsub("\\bamerican\\b", "", cText, ignore.case = T)]
+
+```
+
+Hashtags and number of hashtags can be bearers of sentiment. Let's check which hashtags are used so that we can remove text about airlines but keep the hash, and also keep those hashtags that are related to other aspects of service.
+
+```{r dfCheck1, eval=FALSE, echo=TRUE}
+dfCheck <- strsplit(x = dfTw$cText, split = "") %>% 
+		unlist %>%
+		data.table(tokens = .) %>%
+		filter(grepl("#", tokens)) %>%
+		mutate(token = tolower(tokens)) %>%
+		group_by(token) %>%
+		summarise(counts = n()) %>%
+		arrange(-counts) %>%
+		setDT
+
+dfCheck[1:50]
+
+```
+
+Based on identification of hashtags with the above code, we decide to remove/modify following certain hashtags using the code presented below:
+
+```{r, echo=TRUE, eval=FALSE}
+
+dfTw[, cText := gsub("#destinationdragons", "", cText, ignore.case = T)] #related to a concert!
+dfTw[, cText := gsub("#avgeek", "", cText, ignore.case = T)] #related to aviation geek posts
+dfTw[, cText := gsub("#jetblue", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#UnitedAirlines", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#usairwaysfail", "#fail", cText, ignore.case = T)]
+dfTw[, cText := gsub("#AmericanAirlines", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#united", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#USAirways", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#usairwaysfail", "#fail", cText, ignore.case = T)]
+dfTw[, cText := gsub("#dfw", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#jfk", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#unitedsucks", "#sucks", cText, ignore.case = T)]
+dfTw[, cText := gsub("#flyfi", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#southwest", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#unitedfail", "#fail", cText, ignore.case = T)]
+dfTw[, cText := gsub("#lufthansa", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#southwestairlines", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#dca", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#lax", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#lax", "#", cText, ignore.case = T)]
+dfTw[, cText := gsub("#airlines", "#", cText, ignore.case = T)]
+
+
+```
+
+
+Now that we have removed most hashtags that are related to airlines, whilst keeping the hashtags for other aspects of service, and also keeping words like fail, we can now proceed to other parts of data cleaning.   
+
+Let's check what nouns are being used in the tweets - if these are related to airlines, they can bias our model, so we need to remove them. 
+Here, we are using a POS tagger and Entity detector as found in `spacy`, a popular `Python` package whose API is being used here.
+
+```{r, echo=TRUE,eval=FALSE}
+
+#Running a POS tagger and Entity Detector below
+infoWords <- spacy_parse(dfTw$cText, tag = T) %>% setDT
+
+# How many entities detected...
+infoWords[, .N, by = entity]
+
+#Let's check entities like PERSON, WORK_OF_ART, etc. If some of these are too 
+#specific to US, we need to remove them lest they adversely affect our model
+infoWords[grepl("WORK_OF_ART", entity)]
+infoWords[grepl("TIME", entity)]
+infoWords[grepl("PERSON", entity)]
+infoWords[grepl("MONEY", entity)]
+infoWords[grepl("LOC", entity)]
+infoWords[grepl("PRODUCT", entity)]
+
+
+
+```
+
+
+So two things that I would really want to inspect - the PERSON entities and the ORG entities, as identified in entity detection:
+
+```{r, echo=TRUE,eval=FALSE}
+infoWords[grepl("PERSON", entity)][, .N, by = .(lemma, entity)][order(-N)][1:40]
+infoWords[grepl("ORG", entity)][, .N, by = .(lemma, entity)][order(-N)][1:40]
+
+```
+
+
+Based on the inspection above, the following can be safely removed from our text data:
+
+```{r, echo=TRUE,eval=FALSE}
+
+dfTw[, cText := gsub("vegas|jetblue|david|karen|logan|terry|lauren", "", cText)]
+dfTw[, cText := gsub("\\bunited\\b", "", cText)]
+dfTw[, cText := gsub("\\bairways\\b", "", cText)]
+dfTw[, cText := gsub("\\bairlines\\b", "", cText)]
+dfTw[, cText := gsub("\\dc\\b", "", cText)]
+dfTw[, cText := gsub("\\bus\\b", "", cText)]
+dfTw[, cText := gsub("\\bdc\\b", "", cText)]
+dfTw[, cText := gsub("\\busair\\b", "", cText)]
+dfTw[, cText := gsub("\\bdfw\\b", "", cText)]
+dfTw[, cText := gsub("\\bphl\\b", "", cText)]
+dfTw[, cText := gsub("\\bord\\b", "", cText)]
+dfTw[, cText := gsub("\\bclt\\b", "", cText)]
+dfTw[, cText := gsub("\\bewr\\b", "", cText)]
+dfTw[, cText := gsub("\\bsfo\\b", "", cText)]
+dfTw[, cText := gsub("\\bua\\b", "", cText)]
+dfTw[, cText := gsub("\\bnyc\\b", "", cText)]
+dfTw[, cText := gsub("\\blax\\b", "", cText)]
+dfTw[, cText := gsub("\\bbos\\b", "", cText)]
+dfTw[, cText := gsub("\\blga\\b", "", cText)]
+dfTw[, cText := gsub("\\bbwi\\b", "", cText)]
+dfTw[, cText := gsub("\\bmco\\b", "", cText)]
+dfTw[, cText := gsub("\\bphx\\b", "", cText)]
+dfTw[, cText := gsub("\\biah\\b", "", cText)]
+dfTw[, cText := gsub("\\bswa\\b", "", cText)]
+dfTw[, cText := gsub("\\bbna\\b", "", cText)]
+dfTw[, cText := gsub("\\batl\\b", "", cText)]
+dfTw[, cText := gsub("\\bfll\\b", "", cText)]
+dfTw[, cText := gsub("\\bjfk\\b", "", cText)]
+dfTw[, cText := gsub("\\bden\\b", "", cText)]
+dfTw[, cText := gsub("\\blas\\b", "", cText)]
+dfTw[, cText := gsub("\\bpdx\\b", "", cText)]
+dfTw[, cText := gsub("\\bfaa\\b", "", cText)]
+dfTw[, cText := gsub("\\bdal\\b", "", cText)]
+dfTw[, cText := gsub("\\bmia\\b", "", cText)]
+dfTw[, cText := gsub("\\bdia\\b", "", cText)]
+dfTw[, cText := gsub("\\brdu\\b", "", cText)]
+dfTw[, cText := gsub("\\btsa\\b", "", cText)]
+dfTw[, cText := gsub("\\bfl\\b", "", cText)]
+dfTw[, cText := gsub("\\bamerican\\b", "", cText)]
+dfTw[, cText := gsub("\\bdelta\\b", "", cText)]
+
+
+```
+
+
+Now that we have cleaned the major part of our data (tweets), let's try to gain some more insights into how certain variables like hashtags are related to the sentiment.
+
+Primarily, the intuition is that negative and/or sarcastic tweets will have:  
+
+- more hashtags   
+- more capital letters  
+- specific length of tweets  
+- possibly specific patterns of POS 
+
+so let us check the relationship of target variable with these predictors.
+
+## Number of Hashtags
+
+It seems that number of hashtags are higher for negative sentiment. But a view of proportions would be more suitable in this case.
+
+```{r eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+
+dfTw1 <- readRDS(paste(dp, "data_cleaned_1.rds", sep = "/"))
+
+dfTw1[, numberOfHashtags := str_count(cText, "#")] %>%
+	ggplot(data = ., aes(x = numberOfHashtags)) + 
+	geom_histogram() +
+	facet_wrap(~airline_sentiment) + 
+  ggtitle("Histogram of Number of Hashtags per Sentiment") +
+	theme_ipsum()
+
+
+dfTw1[, Hashtags := ifelse(numberOfHashtags > 0, "More Than 0", "Less Than 0")
+	][, .(counts = .N), by = .(airline_sentiment, Hashtags)
+	][, totals := sum(counts), by = airline_sentiment
+	][, proportions := counts/totals, by = airline_sentiment
+	][order(airline_sentiment)] %>%
+	ggplot(data = ., aes(x = Hashtags, y = proportions)) + 
+	geom_col() +
+  scale_y_continuous(labels = percent) +
+	theme_ipsum() +
+	ggtitle("What Proportion of tweets for each sentiment have more than 0 Hashtags?") +
+	facet_wrap(~airline_sentiment)
+
+
+```
+
+As we see, proportionally, negative and positive sentiments have same number of hashtags. An even better graphic would be to use boxplot.
+
+```{r eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+
+dfTw1 %>%
+	ggplot(data = ., aes(x = airline_sentiment, y = numberOfHashtags)) + 
+	geom_boxplot() +
+	scale_y_log10() +
+	theme_ipsum() +
+  ggtitle("Boxplot for understanding the distribution of the number of hashtags", subtitle = "Significant difference does not exist between sentiments") + labs(y = "Number of Hashtags on Log-scale")
+
+
+```
+
+## Number of Capital Letters
+
+```{r eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+
+dfTw1[, noC := sapply(regmatches(cText, gregexpr("[A-Z]", cText, perl=TRUE)), length), by = tweet_id] %>%
+	ggplot(data = ., aes(x = noC)) + 
+	geom_histogram() +
+	facet_wrap(~airline_sentiment) +
+	ggtitle("Do Negative Tweets have more Caps?") + 
+  labs(x = "Number of Capital Letters") +
+	theme_ipsum()
+
+dfTw1 %>% 
+	ggplot(data = ., aes(x = airline_sentiment, y = noC)) + 
+	geom_boxplot() +
+	scale_y_log10() +
+	ggtitle("Boxplot for distribution of the number of caps per sentiment") +
+  labs(y = "Number of Capital Letters on Log-scale", x = "Sentiment") +
+	theme_ipsum()
+
+```
+
+
+It looks like negative tweets may have more Capital letters as compared to others. This is understandable, because often when people are angry, they type in Block letters.  
+
+However, this could also be due to the fact that our dataset contains a lot of negative tweets: capital letters are just occurring at the beginning of a sentence, but since we have more negative tweets than others, our count is biased.
+
+## Length of Tweets (Using Characters)
+
+```{r eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+
+dfTw1[, lenT := nchar(cText)] %>%
+	ggplot(data = ., aes(x = lenT)) + 
+	geom_histogram(binwidth = 10) +
+	facet_wrap(~airline_sentiment) + 
+  ggtitle("Are Negative Tweets longer than Positive Tweets?") +
+  labs(x = "Length of Tweets", y = "Counts") +
+	theme_ipsum()
+
+dfTw1 %>%
+	ggplot(data = ., aes(x = airline_sentiment, y = lenT)) + 
+	geom_boxplot() +
+	scale_y_log10() +
+  ggtitle("Boxplot for length of tweets per sentiment") +
+  labs(x = "Length of Tweets on Log-scale", y = "Sentiment") +
+	theme_ipsum()
+
+
+```
+
+
+# Dataset Formulation
+
+## Types of Datasets
+
+Our focus will be to try and utilise two datasets:  
+
+- Raw Text of Tweets  
+- POS Tags for Tweets
+
+## Target Class Simplification in presence of Small Dataset
+
+Since we have a rather small dataset to train on whilst the number of classes to learn are three (positive, neutral, negative), it is sensible to consider if we can trim our classes such that an unnecessary class may be removed.  
+
+In the present context, we see that the neutral class is present, although it does not add any value to our sentiment analyses. In such circumstances, it is difficult to establish the utility of the neutral class, so a decision has been made to retain only positive or negative sentiment tweets.  
+
+This is hoped to beneficial, as it will reduce the difficulty of training for our model on the small dataset, whilst not negotiating on the usefulness of our model (i.e., it will still identify positive and negative tweets, even if not neutral).  
+
+## Stratified Sampling
+
+Additionally, we know that there is a class imbalance problem with our dataset. Various procedures exist that aim to reduce the severity of the said issue. Presently, we have decided to form train and test datasets using [`stratified sampling`](https://en.wikipedia.org/wiki/Stratified_sampling), and of these, 70% will be the training set, and 30% the test set. We use `stratified sampling` to ensure that we have a proper representation for each class (positive and negative) in the train as well as test sets.  
+
+We use the following code for forming our initial set of data:
+
+```{r, echo = TRUE, eval=TRUE}
+
+dp <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\non-emirates"
+f1 <- list.files(dp, full.names = T, pattern = "^.+2\\.rds$")
+dfTw1 <- readRDS(f1)
+
+
+# Just minor cleaning/fix in preparation for modelling
+dfTw2 <- dfTw1[airline_sentiment != "neutral", 
+	.(cText, posText, posText2, airline_sentiment, airline_sentiment_confidence)]
+dfTw2[, cText := gsub("!", " ! ", cText)]
+dfTw2[, cText := gsub("\\.", " \\. ", cText)]
+dfTw2[, cText := gsub("\\?", " \\? ", cText)]
+dfTw2[, cText := trimws(cText, "both")]
+dfTw2[, cText := gsub('\\s+', ' ', cText)]
+
+# Adding a new version of tweet text, in case we decide to use this instead
+# The only difference in cText2 from cText is that the former does not contain punctuation
+dfTw2[, cText2 := gsub("[[:punct:]]", "", cText)]
+dfTw2[, cText2 := trimws(cText2, 'both')]
+dfTw2[, cText2 := gsub('\\s+', ' ', cText2)]
+
+# Make the sentiment label numeric
+dfTw2[, sentiment := ifelse(airline_sentiment == "negative", 0, 1)]
+
+
+```
+
+
+Since we have chosen to do `stratified sampling`, the following is how we obtain samples, setting 70% of them for train and the rest for test set:
+
+```{r, echo = TRUE, eval = FALSE}
+
+# Creating training and test sets now, but with stratified sampling so that we mirror actual dist. of each class
+trainIndex <- createDataPartition(as.factor(dfTw2$airline_sentiment), p = .7, list = FALSE)
+
+
+```
+
+## Considerations when using Sequence Models
+
+`Sequence models` from `Deep Learning`, such as `LSTM Networks`, expect data to be presented as sequences of numbers. The numbers actually map to words in a dictionary formulated by a `tokenizer`. When using Sequence models with text data, we need to ensure that we feed the `vocabulary size` of our text data to the tokenizer, and also ensure that the sequences are of the same `length`.  
+
+In present context, this means we need to understand the number of unique words for our vocabulary size, and the number of words in a tweet, on average.
+
+```{r, echo = TRUE, eval = TRUE}
+
+# Calculating vocabulary size for Text and POS data
+
+vocabCText <- dfTw2[, .(tweet_id = 1:.N, cText)] %>%
+    		unnest_tokens(words, cText) %>% 
+		summarise(n_distinct(words)) %>%
+		unlist
+
+vocabPos <- dfTw2[, .(tweet_id = 1:.N, posText)] %>%
+    		unnest_tokens(posTags, posText) %>% 
+		summarise(n_distinct(posTags)) %>% 
+		unlist
+
+
+```
+
+The size of vocabulary for our text data is `r vocabCText` words, whereas that of POS data is `r vocabPos` tags.
+
+We also need to identify how long tweets are, in terms of words and POS tags.
+
+```{r, eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+
+dfTw2[, .(tweet_id = 1:.N, cText)] %>%
+	unnest_tokens(words, cText) %>%
+	group_by(tweet_id) %>%
+	summarise(totalWords = n()) %>%
+	ggplot(data = ., aes(x = totalWords)) + 
+	geom_histogram() +
+  	ggtitle("Length of Tweets in Words") +
+  	labs(x = "Length of Tweets", y = "Counts") +
+	theme_ipsum()
+
+dfTw2[, .(tweet_id = 1:.N, posText)] %>%
+	unnest_tokens(words, posText) %>%
+	group_by(tweet_id) %>%
+	summarise(totalPosTags = n()) %>%
+	ggplot(data = ., aes(x = totalPosTags)) + 
+	geom_histogram() +
+  	ggtitle("Length of Tweets in POS Tags") +
+  	labs(x = "Length of Tweets", y = "Counts") +
+	theme_ipsum()
+
+
+```
+
+
+In light of the graphs shown above, let us set length for text data to 23 and that of POS data to 25. POS data length is higher because we have accounted for Punctuation symbols like [.].
+
+Now, we can begin tokenizing our data with the following code:
+
+```{r, echo = TRUE, eval = FALSE}
+
+cTextTokenizer <- text_tokenizer(num_words = vocabCText, filters = "#$%&()*+,-./:;<=>@[\\]^_`{|}~\t\n", lower = TRUE,
+				split = " ", char_level = FALSE)	
+posTokenizer <- text_tokenizer(num_words = vocabPos, split = " ", char_level = FALSE)
+
+fit_text_tokenizer(cTextTokenizer, dfTw2$cText)
+fit_text_tokenizer(posTokenizer, dfTw2$posText)
+
+save_text_tokenizer(cTextTokenizer, paste(dp, "cTextTokenizer", sep = "/"))
+save_text_tokenizer(posTokenizer, paste(dp, "posTokenizer", sep = "/"))
+
+allSeqTexts <- texts_to_sequences(cTextTokenizer, dfTw2$cText)
+allSeqTexts_m <- pad_sequences(allSeqTexts, maxWordLen)
+allSeqPos <- texts_to_sequences(posTokenizer, dfTw2$posText)
+allSeqPos_m <- pad_sequences(allSeqPos, maxPosLen)
+
+textTrainData <- allSeqTexts_m[trainIndex,]
+posTrainData <- allSeqPos_m[trainIndex,]
+textTestData <- allSeqTexts_m[-trainIndex,]
+posTestData <- allSeqPos_m[-trainIndex,]
+
+#This is not needed now. Initially, it was being used as we tried modelling 3 classes...
+#trainLbl <- to_categorical(dfTw2$sentiment[trainIndex])
+#testLbl <- to_categorical(dfTw2$sentiment[-trainIndex])
+
+trainLbl <- dfTw2$sentiment[trainIndex]
+testLbl <- dfTw2$sentiment[-trainIndex]
+
+saveRDS(textTrainData, paste(dp, "textTrainData.rds", sep = "/"))
+saveRDS(posTrainData, paste(dp, "posTrainData.rds", sep = "/"))
+saveRDS(textTestData, paste(dp, "textTestData.rds", sep = "/"))
+saveRDS(posTestData, paste(dp, "posTestData.rds", sep = "/"))
+saveRDS(trainLbl, paste(dp, "trainLbl.rds", sep = "/"))
+saveRDS(testLbl, paste(dp, "testLbl.rds", sep = "/"))
+
+```
+
+# Model Specification and Experimentation
+
+Deep Learning is a relatively new field that is not fully understood as yet by practitioners. Additionally, the specific flavour of Neural networks suggested for this activity (RNNs and LSTMs) are themselves tricky, in that different parameter settings can affect their performance in various ways.  
+
+In light of this, it was decided to experiment with different types of Neural Networks as well as with various values for parameters, with the hope that such methodical experimentation will help us in achieving our objective.
+
+## Models 
+
+The following three types of Neural Networks were decided to be used:  
+
+- LSTM: This is the vanilla version of a Long Short Term Memory Network  
+- Bi-Directional LSTM: These, as opposed to the vanilla LSTM, have greater power to understand context, as they learn from both past and future states  
+- Convolutional LSTM: A Convolutional Network on an LSTM helps in extracting features from a high dimensional data to a lower dimensional data (arguably, however, we do not have a high dimensional data in current dataset, and this network was used only with hope of detecting features)  
+
+In addition to this, an embedding layer was used for each of the three networks.  
+
+
+## Parameters
+
+The following parameters were chosen to be tweaked for each experiment, for each model:  
+
+- Loss Factor/Dropout Layer Factor: This is used to regularize/penalise a network and prevent overfitting  
+- Batch Variable: Defines the number of samples to learn from in one pass  
+- Units Variable: The number of neurons in a layer  
+- Embedding Layer Output Dimension: The output dimension of the hidden layer (what size would we want our word embedding vectors to be)  
+
+The idea was to produce combinations of each of these variables so that a thorough experimentation can be conducted. This produced 1,500 different combination, and training a model with 1 such combination for 5 epochs took 10 minutes. This meant 250 hours would be consumed, which was impractical.  
+
+After trimming the combinations, a final list was arrived at which, although was not comprehensive, but provided sufficient variation in experiments.   
+
+The following code was used to perform the said experiments.
+
+```{r, echo = TRUE, eval = FALSE, tidy=TRUE}
+
+source("C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\script/loadLibs.R")
+
+em_dp <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\emirates"
+nEm_dp <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\non-emirates"
+
+textTrainData <- readRDS(paste(nEm_dp, "textTrainData.rds", sep = "/"))
+posTrainData <- readRDS(paste(nEm_dp, "posTrainData.rds", sep = "/"))
+textTestData <- readRDS(paste(nEm_dp, "textTestData.rds", sep = "/"))
+posTestData <- readRDS(paste(nEm_dp, "posTestData.rds", sep = "/"))
+
+trainLbl <- readRDS(paste(nEm_dp, "trainLbl.rds", sep = "/"))
+testLbl <- readRDS(paste(nEm_dp, "testLbl.rds", sep = "/"))
+
+cTextTokenizer <- load_text_tokenizer(paste(nEm_dp, "cTextTokenizer", sep = "/"))
+posTokenizer <- load_text_tokenizer(paste(nEm_dp, "posTokenizer", sep = "/"))
+
+textMaxLen <-  23
+posMaxLen <-  25
+textVocab <-  12335
+posVocab <-  15
+
+
+# Specifying parameters for our models
+lossVar <- seq(from = .1, to = .6, by = .1)
+batchVar <- seq(from = 5, to = 45, by = 10)
+unitsVar <- seq(from = 5, to = 95, by = 10)
+embeddOutput <- seq(from = 50, to = 450, by = 100)
+paramsDf <- expand.grid(lossVar, batchVar, unitsVar, embeddOutput)
+# The above take a long time to be trained on models (3-4 days!) so we further trim them:
+
+lossVar <- c(.2, .4, .6)
+batchVar <- c(5, 20, 40)
+unitsVar <- c(5, 20, 40, 90)
+embeddOutput <- c(50, 100, 200)
+paramsDf <- expand.grid(lossVar, batchVar, unitsVar, embeddOutput)
+# Even these are taking a long time! Trim further!
+
+lossVar <- c(.2, .4, .6)
+batchVar <- c(5, 20, 40)
+unitsVar <- c(5, 40, 90)
+paramsDf <- expand.grid(lossVar, batchVar, unitsVar)
+
+# LSTM Text Model
+lstmModel_TextTrainer <- function(trainData, trainDataLbl, testData, testDataLbl,
+				  vocabSize, batchVar, units, loss){
+model <- keras_model_sequential()
+model %>%
+  layer_embedding(input_dim = vocabSize, output_dim = 200) %>% 
+  layer_lstm(units = units, dropout = loss, recurrent_dropout = loss) %>% 
+  layer_dense(units = 1, activation = 'sigmoid')
+model %>% compile(loss = 'binary_crossentropy', optimizer = 'adam', metrics = c('accuracy'))
+model %>% fit(trainData, trainDataLbl, batch_size = batchVar, epochs = 5, validation_data = list(testData, testDataLbl))
+scores <- model %>% evaluate(testData, testDataLbl, batch_size = batchVar)
+return(scores)
+}
+
+res_lstmTxtModel <- vector(mode = "list", length = nrow(paramsDf))
+
+for(i in 1:nrow(paramsDf)){
+params <- paramsDf[i,]
+res_lstmTxtModel[[i]] <- lstmModel_TextTrainer(textTrainData, trainLbl, textTestData, testLbl,
+						textVocab, batchVar = params$Var2, units = params$Var3, 
+						loss = params$Var1)
+}
+
+res_lstmTxtModelDf <- lapply(res_lstmTxtModel, as.data.frame) %>% rbindlist %>% setDT
+res_lstmTxtModelDf[, ':='(lossVar = paramsDf$Var1, batchVar = paramsDf$Var2, unitsVar = paramsDf$Var3)]
+res_lstmTxtModelDf[, ':='(modelType = "LSTM_Text", modelName = 1:.N)]
+saveRDS(res_lstmTxtModelDf, paste(em_dp, "modelExperiment_lstmTxt.rds", sep = "/"))
+
+# BiDirectional LSTM
+lstmBiModel_TextTrainer <- function(trainData, trainDataLbl, testData, testDataLbl,
+				  vocabSize, batchVar, units, loss){
+model <- keras_model_sequential()
+model %>%
+  layer_embedding(input_dim = vocabSize, output_dim = 200) %>% 
+  bidirectional(layer_lstm(units = units)) %>% 
+  layer_dropout(rate = loss) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+model %>% compile(loss = 'binary_crossentropy', optimizer = 'adam', metrics = c('accuracy'))
+model %>% fit(trainData, trainDataLbl, batch_size = batchVar, epochs = 5, validation_data = list(testData, testDataLbl))
+scores <- model %>% evaluate(testData, testDataLbl, batch_size = batchVar)
+return(scores)
+}
+
+res_lstmBiTxtModel <- vector(mode = "list", length = nrow(paramsDf))
+
+for(i in 1:nrow(paramsDf)){
+params <- paramsDf[i,]
+res_lstmBiTxtModel[[i]] <- lstmBiModel_TextTrainer(textTrainData, trainLbl, textTestData, testLbl,
+						textVocab, batchVar = params$Var2, units = params$Var3, 
+						loss = params$Var1)
+}
+
+res_lstmBiTxtModelDf <- lapply(res_lstmBiTxtModel, as.data.frame) %>% rbindlist %>% setDT
+res_lstmBiTxtModelDf[, ':='(lossVar = paramsDf$Var1, batchVar = paramsDf$Var2, unitsVar = paramsDf$Var3)]
+res_lstmBiTxtModelDf[, ':='(modelType = "Bi_LSTM_Text", modelName = 1:.N)]
+saveRDS(res_lstmBiTxtModelDf, paste(em_dp, "modelExperiment_BiLstmTxt.rds", sep = "/"))
+
+# Convolutional LSTM
+lstmConvModel_TextTrainer <- function(trainData, trainDataLbl, testData, testDataLbl,
+				  vocabSize, batchVar, units, loss){
+model <- keras_model_sequential()
+model %>%
+  layer_embedding(input_dim = vocabSize, output_dim = 200) %>% 
+  layer_conv_1d(filters = 3, kernel_size = 3) %>%
+  layer_max_pooling_1d() %>%
+  layer_lstm(units = units) %>% 
+  layer_dropout(rate = loss) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+model %>% compile(loss = 'binary_crossentropy', optimizer = 'adam', metrics = c('accuracy'))
+model %>% fit(trainData, trainDataLbl, batch_size = batchVar, epochs = 5, validation_data = list(testData, testDataLbl))
+scores <- model %>% evaluate(testData, testDataLbl, batch_size = batchVar)
+return(scores)
+}
+
+res_lstmConvTxtModel <- vector(mode = "list", length = nrow(paramsDf))
+
+for(i in 1:nrow(paramsDf)){
+params <- paramsDf[i,]
+res_lstmConvTxtModel[[i]] <- lstmConvModel_TextTrainer(textTrainData, trainLbl, textTestData, testLbl,
+						textVocab, batchVar = params$Var2, units = params$Var3, 
+						loss = params$Var1)
+}
+
+res_lstmConvTxtModelDf <- lapply(res_lstmConvTxtModel, as.data.frame) %>% rbindlist %>% setDT
+res_lstmConvTxtModelDf[, ':='(lossVar = paramsDf$Var1, batchVar = paramsDf$Var2, unitsVar = paramsDf$Var3)]
+res_lstmConvTxtModelDf[, ':='(modelType = "Conv_LSTM_Text", modelName = 1:.N)]
+saveRDS(res_lstmConvTxtModelDf, paste(em_dp, "modelExperiment_ConvLstmTxt.rds", sep = "/"))
+
+
+
+```
+
+
+## Results
+
+Following are the results obtained from experimenting with the models. Overfitting seemed apparent here, so it was decided to use 1 model that was good (LSTM Model #8) and two others that did not perform so well (Conv. LSTM Model #20 & BiLSTM Model #3).  
+
+```{r, eval = TRUE, include = TRUE, message = FALSE, echo=FALSE, warning=FALSE, fig.width=8, fig.height=5}
+
+em_dp <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\emirates"
+rf <- list.files(em_dp, full.names = T, pattern = "modelExperiment")
+dfRes <- lapply(rf, readRDS) %>% rbindlist
+
+ggplot(data = dfRes, aes(x = as.factor(modelName), y = acc, colour = modelType)) +
+	geom_point(size = 2) +
+  labs(x = "Model Number", y = "Accuracy") +
+  scale_y_percent() +
+	theme_ipsum()
+
+
+```
+
+
+## Ensemble Models with Voting
+
+Finally, it was decided to combine the predictive power of our 3 selected models in a manner of `weighted voting`: If any of our 3 models predicted a positive sentiment, the tweet was classified as positive. This was not the case for negative sentiments. This was done as it was observed that models were biased towards negative sentiment, due to the larger training sample of negative tweets. 
+
+
+# Conclusive Remarks
+
+At the end of the experimentation phase, a decision was made to use 3 models in an ensemble, to conclude the project. However, [all models are wrong](https://en.wikipedia.org/wiki/All_models_are_wrong), just that some are more useful. This means there is always plenty of room for improvement, and remarks in this section are directed towards what improvements could be made, given more time for the project.
+
+## Training Data and the Problem of Sentiment Detection
+
+The following observations can be made about the training data used in this project:  
+
+- It had sentiment assigned on a per tweet basis (it did not consider if multiple tweets that were actually replies to each other could affect the other's sentiment. The methodolofy thereby reduced the **context** for labeling sentiments)    
+- Notably, some of the tweets, even when considering the wider context of replies, were quite vague to assign a negative or positive label. This, then, has a crucial impact on the trained algorithm  
+- The size of dataset was small, and possibly non-neural network architectures that are simpler would be more adequate a fit for the problem  
+
+These characteristics of the dataset were intertwined with the problem of sentiment detection, especially the first mentioned: how the training data does not consider the context (replies, messages) of tweets for sentiment detection. It shows how sentiment detection can often become a difficult task that needs a change to approach, in this case, reassigning sentiment by possibly reading all replies to a tweet as one conversation, and then assigning sentiment on a conversation basis, rather than tweet basis.  
+
+## Models
+
+LSTMs and their variations were used as classifiers. It is possible, however, that in presence of small datasets, other traditional Machine Learning techniques are more suitable.  
+
+Nevertheless, even within Deep Learning architecture, some other exotic models or combinations thereof could be tried that may have a better performance, such as Neural Turing Machines. These also have an attention mechanism which allows them to achieve better results even with small datasets.  
+
+Additionally, some tweaks to the current approach can be made too, such as having multiple inputs to various RNNs/LSTMs, of which one could be the text sequences, other could be POS sequences, and yet others could be matrices showcasing various info on each tweet, such as the sentiment of tweets it replies to, the time of the day, Tf-Idf matrices, etc.  
+
+## Dashboard
+
+The current dashboard was designed, for its interactivity, on HTML5. An even better approach could be to deploy an instance of the project, bundled up as an `R` app, to the cloud. Such a dashboard will be viewable by all who have access to the premises' LAN, and will also feature an auto-update. This will allow the user to view results of sentiment detection for tweets in almost real-time, as it updates tweets after every 5 hours.  
+

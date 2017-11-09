@@ -1,0 +1,230 @@
+---
+title: "Emirates Twitter Analysis Dashboard"
+author: "Ali Arsalan Kazmi"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    theme: journal
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+library(highcharter)
+library(viridisLite)
+library(flexdashboard)
+library(rtweet)
+library(treemap)
+library(forecast)
+library(DT)
+
+source("C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\script/loadLibs.R")
+
+em_dp <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\emirates"
+nEm_dp <- "C:\\Users\\paperspace\\Documents\\Emirates Coding Challenge\\data\\non-emirates"
+
+emTwDf <- readRDS(paste(em_dp, "emiratesTweets.rds", sep = "/"))
+emTwDf[, cTweets := plain_tweets(text)]
+
+tmDf <- readRDS(paste(em_dp, "topicModel.rds", sep = "/"))
+preds <- readRDS(paste(em_dp, "predictions.rds", sep = "/"))
+
+emTwDf[, sentiment := preds$finalPredLbl]
+emTwDf[, sentLbl := ifelse(sentiment == 0, "Negative", "Positive")]
+
+thm <- 
+  hc_theme(
+    colors = c("#a30404", "#c91b1b", "#bf4040"),
+    chart = list(
+      backgroundColor = "transparent",
+      style = list(fontFamily = "Source Sans Pro")
+    ),
+    xAxis = list(
+      gridLineWidth = 1
+    )
+  )
+
+thm2 <- 
+  hc_theme(
+    colors = rev(c("#a70000", "#ff0000", "#ff5252", 
+                                  "#ff7b7b", "#ffbaba")),
+    chart = list(
+      backgroundColor = "transparent",
+      style = list(fontFamily = "Source Sans Pro")
+    ),
+    xAxis = list(
+      gridLineWidth = 1
+    )
+  )
+
+thm3 <- 
+  hc_theme(
+    colors = rev(c("#a70000", "#ffbaba")),
+    chart = list(
+      backgroundColor = "transparent",
+      style = list(fontFamily = "Source Sans Pro")
+    ),
+    xAxis = list(
+      gridLineWidth = 1
+    )
+  )
+
+```
+
+Column {.tabset data-width=500}
+-----------------------------------------------------------------------
+
+### Twitter Sentiments
+
+```{r}
+#AirPassengers %>% 
+#  forecast(level = 90) %>% 
+#  hchart() %>% 
+#  hc_add_theme(thm)
+
+emTwDf[, .(cDate = as.Date(created_at), sentiment = sentLbl)
+       ][, .(TotalTweets = .N), by = .(cDate, sentiment)] %>%
+  hchart(., "line", hcaes(cDate, TotalTweets, group = sentiment)) %>%
+  hc_xAxis(title = list(text = "Date")) %>%
+  hc_yAxis(title = list(text = "Number of Tweets")) %>%
+  hc_add_theme(thm3)
+
+
+```
+
+###  Tweet Wordclouds
+
+```{r}
+
+library(wordcloud)
+library(reshape2)
+
+emTwDf[, .(sentiment = sentLbl, cText = gsub("[[:punct:]]", "", cTweets))] %>%
+  unnest_tokens(words, cText) %>%
+  count(words, sentiment, sort = TRUE) %>%
+  acast(words ~ sentiment, value.var = "n", fill = 0)  %>%
+  comparison.cloud(colors = c("#a70000", "#000000"),
+                   max.words = 150, scale = c(3,1))
+
+
+
+```
+
+
+### Sentiment by Countries
+
+```{r, fig.keep='none'}
+
+# 
+# ct <- emTwDf[, .(ct = tolower(unlist(country)))
+#             ][!is.na(ct), .N, by = ct
+#             ][order(-N)
+#             ][1:20] 
+# 
+# .simpleCap <- function(x) {
+#     s <- strsplit(x, " ")[[1]]
+#     paste(toupper(substring(s, 1, 1)), substring(s, 2),
+#           sep = "", collapse = " ")
+# }
+# 
+# ct[, ct := .simpleCap(ct), by = ct]
+# 
+# hchart(ct[1:10], "column", hcaes(x = ct, y = N)) %>%
+#   hc_add_theme(thm) %>% 
+#   hc_chart(type = "bar") %>%
+#   hc_title(text = "Top 10 Countries Tweeting @Emirates") %>%
+#   hc_xAxis(title = list(text = "Countries")) %>%
+#   hc_yAxis(title = list(text = "Number of Occurrences")) %>%
+#   hc_exporting(enabled = TRUE, filename = "top 10 countries tweeting Emirates", 
+#                type = "image/jpeg")
+
+
+# ct <- emTwDf[, .(countryCode = tolower(unlist(country_code)))
+#             ][!is.na(countryCode), .(totalTweets = .N), by = countryCode
+#             ][order(-totalTweets)
+#             ][1:20]
+# 
+# emTree <- treemap(dtf = ct, index = "countryCode", vSize = "totalTweets",
+#                   vColor = "totalTweets", type = "value",
+#                   palette = rev(c("#a70000", "#ff0000", "#ff5252", 
+#                                   "#ff7b7b", "#ffbaba")),
+#                   title = "Sentiment by Countries")
+# highchart() %>% 
+#   hc_add_series_treemap(emTree, allowDrillToNode = FALSE,
+#                         layoutAlgorithm = "squarified") %>% 
+#   hc_add_theme(thm)
+
+emTwDf[, cSent := ifelse(sentiment == 0, -1, sentiment)]
+ct <- emTwDf[!is.na(country), 
+             .(overallSentiment = sum(cSent),
+               totalTweets = .N), by = country
+       ]
+setnames(ct, "overallSentiment", "Overall Sentiment")
+setnames(ct, "totalTweets", "Total Tweets")
+#ct[overallSentiment == 0, overallSentiment := "Neutral"]
+#ct[overallSentiment > 0, overallSentiment := "Positive"]
+#ct[overallSentiment < 0, overallSentiment := "Negative"]
+
+emTree <- treemap(dtf = ct, index = "country", vSize = "Total Tweets",
+                  vColor = "Overall Sentiment", type = "value",
+                  palette = rev(c("#a70000", "#ff0000", "#ff5252",
+                                  "#ff7b7b", "#ffbaba")),
+                  title = "Sentiment greater than 0 indicates Positivity and vice versa")
+highchart() %>%
+  hc_add_series_treemap(emTree, allowDrillToNode = FALSE,
+                        layoutAlgorithm = "squarified") %>%
+  hc_title(text = "Overall Sentiment by Number of Tweets for Countries") %>%
+  hc_tooltip(pointFormat = "<b>{point.name}</b>:<br>
+                            Total Tweets: {point.value:,.0f}<br>
+                             Overall Sentiment: {point.valuecolor:,.0f}") %>% 
+  hc_add_theme(thm)
+
+
+
+```
+
+
+
+Column {.tabset data-width=500}
+-----------------------------------------------------------------------
+
+### Hashtags' Analysis
+
+```{r, fig.keep='none'}
+
+ht <- emTwDf[, .(ht = tolower(unlist(hashtags)))
+            ][!is.na(ht), .N, by = ht
+            ][order(-N)
+            ][1:20] 
+
+hchart(ht[1:10], "column", hcaes(x = ht, y = N)) %>%
+  hc_add_theme(thm) %>% 
+  hc_chart(type = "bar") %>%
+  hc_title(text = "Top 10 Hashtags For @Emirates Tweets") %>%
+  hc_xAxis(title = list(text = "Hashtags")) %>%
+  hc_yAxis(title = list(text = "Number of Occurrences")) %>%
+  hc_exporting(enabled = TRUE, filename = "top 10 hashtags", 
+               type = "image/jpeg") 
+
+```
+
+
+
+
+### Topics Identified
+
+```{r}
+
+datatable(tmDf, rownames = F, caption = "For each identified topic, 15 main terms/words distinguishing it are shown")
+
+
+```
+
+
+### Tweets with Classification
+
+```{r}
+
+datatable(emTwDf[, .(tweet = text, sentiment = sentLbl)], rownames = F, filter = "top", options = list(columnDefs = list(list(searchable = FALSE, targets = 0))
+               ))
+
+
+```
